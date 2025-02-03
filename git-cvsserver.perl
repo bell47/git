@@ -15,7 +15,7 @@
 ####
 ####
 
-use 5.008;
+require v5.26;
 use strict;
 use warnings;
 use bytes;
@@ -26,7 +26,7 @@ use File::Path qw/rmtree/;
 use File::Basename;
 use Getopt::Long qw(:config require_order no_ignore_case);
 
-my $VERSION = '@@GIT_VERSION@@';
+my $VERSION = '@GIT_VERSION@';
 
 my $log = GITCVS::log->new();
 my $cfg;
@@ -152,7 +152,7 @@ $state->{allowed_roots} = [ @ARGV ];
 
 # don't export the whole system unless the users requests it
 if ($state->{'export-all'} && !@{$state->{allowed_roots}}) {
-    die "--export-all can only be used together with an explicit whitelist\n";
+    die "--export-all can only be used together with an explicit '<directory>...' list\n";
 }
 
 # Environment handling for running under git-shell

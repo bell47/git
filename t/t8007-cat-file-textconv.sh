@@ -1,6 +1,7 @@
 #!/bin/sh
 
 test_description='git cat-file textconv support'
+
 . ./test-lib.sh
 
 cat >helper <<'EOF'

@@ -1,26 +1,37 @@
-#include "cache.h"
+#include "git-compat-util.h"
+#include "abspath.h"
+#include "advice.h"
+#include "gettext.h"
 #include "hook.h"
+#include "path.h"
 #include "run-command.h"
 #include "config.h"
+#include "strbuf.h"
+#include "environment.h"
+#include "setup.h"
 
-const char *find_hook(const char *name)
+const char *find_hook(struct repository *r, const char *name)
 {
 	static struct strbuf path = STRBUF_INIT;
 
+	int found_hook;
+
 	strbuf_reset(&path);
-	strbuf_git_path(&path, "hooks/%s", name);
-	if (access(path.buf, X_OK) < 0) {
+	strbuf_repo_git_path(&path, r, "hooks/%s", name);
+	found_hook = access(path.buf, X_OK) >= 0;
+#ifdef STRIP_EXTENSION
+	if (!found_hook) {
 		int err = errno;
 
-#ifdef STRIP_EXTENSION
 		strbuf_addstr(&path, STRIP_EXTENSION);
-		if (access(path.buf, X_OK) >= 0)
-			return path.buf;
-		if (errno == EACCES)
-			err = errno;
+		found_hook = access(path.buf, X_OK) >= 0;
+		if (!found_hook)
+			errno = err;
+	}
 #endif
 
-		if (err == EACCES && advice_enabled(ADVICE_IGNORED_HOOK)) {
+	if (!found_hook) {
+		if (errno == EACCES && advice_enabled(ADVICE_IGNORED_HOOK)) {
 			static struct string_list advise_given = STRING_LIST_INIT_DUP;
 
 			if (!string_list_lookup(&advise_given, name)) {
@@ -28,7 +39,7 @@ const char *find_hook(const char *name)
 				advise(_("The '%s' hook was ignored because "
 					 "it's not set as executable.\n"
 					 "You can disable this warning with "
-					 "`git config advice.ignoredHook false`."),
+					 "`git config set advice.ignoredHook false`."),
 				       path.buf);
 			}
 		}
@@ -37,15 +48,15 @@ const char *find_hook(const char *name)
 	return path.buf;
 }
 
-int hook_exists(const char *name)
+int hook_exists(struct repository *r, const char *name)
 {
-	return !!find_hook(name);
+	return !!find_hook(r, name);
 }
 
 static int pick_next_hook(struct child_process *cp,
-			  struct strbuf *out,
+			  struct strbuf *out UNUSED,
 			  void *pp_cb,
-			  void **pp_task_cb)
+			  void **pp_task_cb UNUSED)
 {
 	struct hook_cb_data *hook_cb = pp_cb;
 	const char *hook_path = hook_cb->hook_path;
@@ -54,16 +65,18 @@ static int pick_next_hook(struct child_process *cp,
 		return 0;
 
 	cp->no_stdin = 1;
-	strvec_pushv(&cp->env_array, hook_cb->options->env.v);
+	strvec_pushv(&cp->env, hook_cb->options->env.v);
+	/* reopen the file for stdin; run_command closes it. */
+	if (hook_cb->options->path_to_stdin) {
+		cp->no_stdin = 0;
+		cp->in = xopen(hook_cb->options->path_to_stdin, O_RDONLY);
+	}
 	cp->stdout_to_stderr = 1;
 	cp->trace2_hook_name = hook_cb->hook_name;
 	cp->dir = hook_cb->options->dir;
 
 	strvec_push(&cp->args, hook_path);
 	strvec_pushv(&cp->args, hook_cb->options->args.v);
-
-	/* Provide context for errors if necessary */
-	*pp_task_cb = (char *)hook_path;
 
 	/*
 	 * This pick_next_hook() will be called again, we're only
@@ -75,25 +88,21 @@ static int pick_next_hook(struct child_process *cp,
 	return 1;
 }
 
-static int notify_start_failure(struct strbuf *out,
+static int notify_start_failure(struct strbuf *out UNUSED,
 				void *pp_cb,
-				void *pp_task_cp)
+				void *pp_task_cp UNUSED)
 {
 	struct hook_cb_data *hook_cb = pp_cb;
-	const char *hook_path = pp_task_cp;
 
 	hook_cb->rc |= 1;
-
-	strbuf_addf(out, _("Couldn't start hook '%s'\n"),
-		    hook_path);
 
 	return 1;
 }
 
 static int notify_hook_finished(int result,
-				struct strbuf *out,
+				struct strbuf *out UNUSED,
 				void *pp_cb,
-				void *pp_task_cb)
+				void *pp_task_cb UNUSED)
 {
 	struct hook_cb_data *hook_cb = pp_cb;
 	struct run_hooks_opt *opt = hook_cb->options;
@@ -112,7 +121,8 @@ static void run_hooks_opt_clear(struct run_hooks_opt *options)
 	strvec_clear(&options->args);
 }
 
-int run_hooks_opt(const char *hook_name, struct run_hooks_opt *options)
+int run_hooks_opt(struct repository *r, const char *hook_name,
+		  struct run_hooks_opt *options)
 {
 	struct strbuf abs_path = STRBUF_INIT;
 	struct hook_cb_data cb_data = {
@@ -120,9 +130,21 @@ int run_hooks_opt(const char *hook_name, struct run_hooks_opt *options)
 		.hook_name = hook_name,
 		.options = options,
 	};
-	const char *const hook_path = find_hook(hook_name);
-	int jobs = 1;
+	const char *const hook_path = find_hook(r, hook_name);
 	int ret = 0;
+	const struct run_process_parallel_opts opts = {
+		.tr2_category = "hook",
+		.tr2_label = hook_name,
+
+		.processes = 1,
+		.ungroup = 1,
+
+		.get_next_task = pick_next_hook,
+		.start_failure = notify_start_failure,
+		.task_finished = notify_hook_finished,
+
+		.data = &cb_data,
+	};
 
 	if (!options)
 		BUG("a struct run_hooks_opt must be provided to run_hooks");
@@ -144,13 +166,7 @@ int run_hooks_opt(const char *hook_name, struct run_hooks_opt *options)
 		cb_data.hook_path = abs_path.buf;
 	}
 
-	run_processes_parallel_tr2(jobs,
-				   pick_next_hook,
-				   notify_start_failure,
-				   notify_hook_finished,
-				   &cb_data,
-				   "hook",
-				   hook_name);
+	run_processes_parallel(&opts);
 	ret = cb_data.rc;
 cleanup:
 	strbuf_release(&abs_path);
@@ -158,14 +174,14 @@ cleanup:
 	return ret;
 }
 
-int run_hooks(const char *hook_name)
+int run_hooks(struct repository *r, const char *hook_name)
 {
 	struct run_hooks_opt opt = RUN_HOOKS_OPT_INIT;
 
-	return run_hooks_opt(hook_name, &opt);
+	return run_hooks_opt(r, hook_name, &opt);
 }
 
-int run_hooks_l(const char *hook_name, ...)
+int run_hooks_l(struct repository *r, const char *hook_name, ...)
 {
 	struct run_hooks_opt opt = RUN_HOOKS_OPT_INIT;
 	va_list ap;
@@ -176,5 +192,5 @@ int run_hooks_l(const char *hook_name, ...)
 		strvec_push(&opt.args, arg);
 	va_end(ap);
 
-	return run_hooks_opt(hook_name, &opt);
+	return run_hooks_opt(r, hook_name, &opt);
 }

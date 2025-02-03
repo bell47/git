@@ -1,6 +1,7 @@
 #!/bin/sh
 
 test_description='pack-objects breaks long cross-pack delta chains'
+
 . ./test-lib.sh
 
 # This mirrors a repeated push setup:
