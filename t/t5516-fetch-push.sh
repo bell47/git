@@ -12,11 +12,13 @@ This test checks the following functionality:
 * --porcelain output format
 * hiderefs
 * reflogs
+* URL validation
 '
 
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
+TEST_CREATE_REPO_NO_TEMPLATE=1
 . ./test-lib.sh
 
 D=$(pwd)
@@ -25,7 +27,8 @@ mk_empty () {
 	repo_name="$1"
 	test_when_finished "rm -rf \"$repo_name\"" &&
 	test_path_is_missing "$repo_name" &&
-	git init "$repo_name" &&
+	git init --template= "$repo_name" &&
+	mkdir "$repo_name"/.git/hooks &&
 	git -C "$repo_name" config receive.denyCurrentBranch warn
 }
 
@@ -77,7 +80,7 @@ mk_test_with_hooks() {
 
 mk_child() {
 	test_when_finished "rm -rf \"$2\"" &&
-	git clone "$1" "$2"
+	git clone --template= "$1" "$2"
 }
 
 check_push_result () {
@@ -116,6 +119,17 @@ test_expect_success setup '
 	the_commit=$(git show-ref -s --verify refs/heads/main)
 
 '
+
+for cmd in push fetch
+do
+	for opt in ipv4 ipv6
+	do
+		test_expect_success "reject 'git $cmd --no-$opt'" '
+			test_must_fail git $cmd --no-$opt 2>err &&
+			grep "unknown option .no-$opt" err
+		'
+	done
+done
 
 test_expect_success 'fetch without wildcard' '
 	mk_empty testrepo &&
@@ -197,7 +211,10 @@ test_expect_success 'push with negotiation' '
 	test_commit -C testrepo unrelated_commit &&
 	git -C testrepo config receive.hideRefs refs/remotes/origin/first_commit &&
 	test_when_finished "rm event" &&
-	GIT_TRACE2_EVENT="$(pwd)/event" git -c protocol.version=2 -c push.negotiate=1 push testrepo refs/heads/main:refs/remotes/origin/main &&
+	GIT_TRACE2_EVENT="$(pwd)/event" \
+		git -c protocol.version=2 -c push.negotiate=1 \
+		push testrepo refs/heads/main:refs/remotes/origin/main &&
+	grep \"key\":\"total_rounds\",\"value\":\"1\" event &&
 	grep_wrote 2 event # 1 commit, 1 tree
 '
 
@@ -210,18 +227,32 @@ test_expect_success 'push with negotiation proceeds anyway even if negotiation f
 	GIT_TEST_PROTOCOL_VERSION=0 GIT_TRACE2_EVENT="$(pwd)/event" \
 		git -c push.negotiate=1 push testrepo refs/heads/main:refs/remotes/origin/main 2>err &&
 	grep_wrote 5 event && # 2 commits, 2 trees, 1 blob
-	test_i18ngrep "push negotiation failed" err
+	test_grep "push negotiation failed" err
+'
+
+test_expect_success 'push deletion with negotiation' '
+	mk_empty testrepo &&
+	git push testrepo $the_first_commit:refs/heads/master &&
+	git -c push.negotiate=1 push testrepo \
+		:master $the_first_commit:refs/heads/next 2>errors-2 &&
+	test_grep ! "negotiate-only needs one or " errors-2 &&
+	git -c push.negotiate=1 push testrepo :next 2>errors-1 &&
+	test_grep ! "negotiate-only needs one or " errors-1
 '
 
 test_expect_success 'push with negotiation does not attempt to fetch submodules' '
 	mk_empty submodule_upstream &&
 	test_commit -C submodule_upstream submodule_commit &&
+	test_config_global protocol.file.allow always &&
 	git submodule add ./submodule_upstream submodule &&
 	mk_empty testrepo &&
 	git push testrepo $the_first_commit:refs/remotes/origin/first_commit &&
 	test_commit -C testrepo unrelated_commit &&
 	git -C testrepo config receive.hideRefs refs/remotes/origin/first_commit &&
-	git -c submodule.recurse=true -c protocol.version=2 -c push.negotiate=1 push testrepo refs/heads/main:refs/remotes/origin/main 2>err &&
+	GIT_TRACE2_EVENT="$(pwd)/event"  git -c submodule.recurse=true \
+		-c protocol.version=2 -c push.negotiate=1 \
+		push testrepo refs/heads/main:refs/remotes/origin/main 2>err &&
+	grep \"key\":\"total_rounds\",\"value\":\"1\" event &&
 	! grep "Fetching submodule" err
 '
 
@@ -389,6 +420,11 @@ test_expect_success 'push with ambiguity' '
 	test_must_fail git push testrepo main:frotz &&
 	check_push_result testrepo $the_first_commit heads/frotz tags/frotz
 
+'
+
+test_expect_success 'push with onelevel ref' '
+	mk_test testrepo heads/main &&
+	test_must_fail git push testrepo HEAD:refs/onelevel
 '
 
 test_expect_success 'push with colon-less refspec (1)' '
@@ -596,6 +632,26 @@ test_expect_success 'branch.*.pushremote config order is irrelevant' '
 	git push &&
 	check_push_result one_repo $the_first_commit heads/main &&
 	check_push_result two_repo $the_commit heads/main
+'
+
+test_expect_success 'push rejects empty branch name entries' '
+	mk_test one_repo heads/main &&
+	test_config remote.one.url one_repo &&
+	test_config branch..remote one &&
+	test_config branch..merge refs/heads/ &&
+	test_config branch.main.remote one &&
+	test_config branch.main.merge refs/heads/main &&
+	test_must_fail git push 2>err &&
+	grep "bad config variable .branch\.\." err
+'
+
+test_expect_success 'push ignores "branch." config without subsection' '
+	mk_test one_repo heads/main &&
+	test_config remote.one.url one_repo &&
+	test_config branch.autoSetupMerge true &&
+	test_config branch.main.remote one &&
+	test_config branch.main.merge refs/heads/main &&
+	git push
 '
 
 test_expect_success 'push with dry-run' '
@@ -868,6 +924,13 @@ test_expect_success 'push --delete refuses empty string' '
 	test_must_fail git push testrepo --delete ""
 '
 
+test_expect_success 'push --delete onelevel refspecs' '
+	mk_test testrepo heads/main &&
+	git -C testrepo update-ref refs/onelevel refs/heads/main &&
+	git push testrepo --delete refs/onelevel &&
+	test_must_fail git -C testrepo rev-parse --verify refs/onelevel
+'
+
 test_expect_success 'warn on push to HEAD of non-bare repository' '
 	mk_test testrepo heads/main &&
 	(
@@ -912,10 +975,11 @@ test_expect_success 'allow push to HEAD of non-bare repository (config)' '
 	! grep "warning: updating the current branch" stderr
 '
 
-test_expect_success 'fetch with branches' '
+test_expect_success WITHOUT_BREAKING_CHANGES 'fetch with branches' '
 	mk_empty testrepo &&
 	git branch second $the_first_commit &&
 	git checkout second &&
+	mkdir testrepo/.git/branches &&
 	echo ".." > testrepo/.git/branches/branch1 &&
 	(
 		cd testrepo &&
@@ -927,8 +991,9 @@ test_expect_success 'fetch with branches' '
 	git checkout main
 '
 
-test_expect_success 'fetch with branches containing #' '
+test_expect_success WITHOUT_BREAKING_CHANGES 'fetch with branches containing #' '
 	mk_empty testrepo &&
+	mkdir testrepo/.git/branches &&
 	echo "..#second" > testrepo/.git/branches/branch2 &&
 	(
 		cd testrepo &&
@@ -940,10 +1005,14 @@ test_expect_success 'fetch with branches containing #' '
 	git checkout main
 '
 
-test_expect_success 'push with branches' '
+test_expect_success WITHOUT_BREAKING_CHANGES 'push with branches' '
 	mk_empty testrepo &&
 	git checkout second &&
+
+	test_when_finished "rm -rf .git/branches" &&
+	mkdir .git/branches &&
 	echo "testrepo" > .git/branches/branch1 &&
+
 	git push branch1 &&
 	(
 		cd testrepo &&
@@ -953,9 +1022,13 @@ test_expect_success 'push with branches' '
 	)
 '
 
-test_expect_success 'push with branches containing #' '
+test_expect_success WITHOUT_BREAKING_CHANGES 'push with branches containing #' '
 	mk_empty testrepo &&
+
+	test_when_finished "rm -rf .git/branches" &&
+	mkdir .git/branches &&
 	echo "testrepo#branch3" > .git/branches/branch2 &&
+
 	git push branch2 &&
 	(
 		cd testrepo &&
@@ -1138,18 +1211,16 @@ test_expect_success 'push --porcelain --dry-run rejected' '
 '
 
 test_expect_success 'push --prune' '
-	mk_test testrepo heads/main heads/second heads/foo heads/bar &&
+	mk_test testrepo heads/main heads/foo heads/bar &&
 	git push --prune testrepo : &&
 	check_push_result testrepo $the_commit heads/main &&
-	check_push_result testrepo $the_first_commit heads/second &&
 	! check_push_result testrepo $the_first_commit heads/foo heads/bar
 '
 
 test_expect_success 'push --prune refspec' '
-	mk_test testrepo tmp/main tmp/second tmp/foo tmp/bar &&
+	mk_test testrepo tmp/main tmp/foo tmp/bar &&
 	git push --prune testrepo "refs/heads/*:refs/tmp/*" &&
 	check_push_result testrepo $the_commit tmp/main &&
-	check_push_result testrepo $the_first_commit tmp/second &&
 	! check_push_result testrepo $the_first_commit tmp/foo tmp/bar
 '
 
@@ -1204,7 +1275,7 @@ test_expect_success 'fetch exact SHA1' '
 		# fetching the hidden object should fail by default
 		test_must_fail env GIT_TEST_PROTOCOL_VERSION=0 \
 			git fetch -v ../testrepo $the_commit:refs/heads/copy 2>err &&
-		test_i18ngrep "Server does not allow request for unadvertised object" err &&
+		test_grep "Server does not allow request for unadvertised object" err &&
 		test_must_fail git rev-parse --verify refs/heads/copy &&
 
 		# the server side can allow it to succeed
@@ -1306,7 +1377,7 @@ do
 				git fetch ../testrepo/.git $SHA1_3 2>err &&
 			# ideally we would insist this be on a "remote error:"
 			# line, but it is racy; see the commit message
-			test_i18ngrep "not our ref.*$SHA1_3\$" err
+			test_grep "not our ref.*$SHA1_3\$" err
 		)
 	'
 done
@@ -1321,7 +1392,8 @@ test_expect_success 'fetch follows tags by default' '
 		git tag -m "annotated" tag &&
 		git for-each-ref >tmp1 &&
 		sed -n "p; s|refs/heads/main$|refs/remotes/origin/main|p" tmp1 |
-		sort -k 3 >../expect
+		sed -n "p; s|refs/heads/main$|refs/remotes/origin/HEAD|p"  |
+		sort -k 4 >../expect
 	) &&
 	test_when_finished "rm -rf dst" &&
 	git init dst &&
@@ -1344,7 +1416,7 @@ test_expect_success 'peeled advertisements are not considered ref tips' '
 	oid=$(git -C testrepo rev-parse mytag^{commit}) &&
 	test_must_fail env GIT_TEST_PROTOCOL_VERSION=0 \
 		git fetch testrepo $oid 2>err &&
-	test_i18ngrep "Server does not allow request for unadvertised object" err
+	test_grep "Server does not allow request for unadvertised object" err
 '
 
 test_expect_success 'pushing a specific ref applies remote.$name.push as refmap' '
@@ -1811,6 +1883,28 @@ test_expect_success 'refuse to push a hidden ref, and make sure do not pollute t
 	git -C testrepo config receive.unpackLimit 1 &&
 	test_must_fail git push testrepo HEAD:refs/hidden/foo &&
 	test_dir_is_empty testrepo/.git/objects/pack
+'
+
+test_expect_success 'push with config push.useBitmaps' '
+	mk_test testrepo heads/main &&
+	git checkout main &&
+	test_unconfig push.useBitmaps &&
+	GIT_TRACE2_EVENT="$PWD/default" \
+	git push --quiet testrepo main:test &&
+	test_subcommand git pack-objects --all-progress-implied --revs --stdout \
+		--thin --delta-base-offset -q <default &&
+
+	test_config push.useBitmaps true &&
+	GIT_TRACE2_EVENT="$PWD/true" \
+	git push --quiet testrepo main:test2 &&
+	test_subcommand git pack-objects --all-progress-implied --revs --stdout \
+		--thin --delta-base-offset -q <true &&
+
+	test_config push.useBitmaps false &&
+	GIT_TRACE2_EVENT="$PWD/false" \
+	git push --quiet testrepo main:test3 &&
+	test_subcommand git pack-objects --all-progress-implied --revs --stdout \
+		--thin --delta-base-offset -q --no-use-bitmap-index <false
 '
 
 test_done

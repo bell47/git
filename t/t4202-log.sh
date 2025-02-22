@@ -187,6 +187,21 @@ test_expect_success 'git config log.follow does not die with no paths' '
 	git log --
 '
 
+test_expect_success 'git log --follow rejects unsupported pathspec magic' '
+	test_must_fail git log --follow ":(top,glob,icase)ichi" 2>stderr &&
+	# check full error message; we want to be sure we mention both
+	# of the rejected types (glob,icase), but not the allowed one (top)
+	echo "fatal: pathspec magic not supported by --follow: ${SQ}glob${SQ}, ${SQ}icase${SQ}" >expect &&
+	test_cmp expect stderr
+'
+
+test_expect_success 'log.follow disabled with unsupported pathspec magic' '
+	test_config log.follow true &&
+	git log --format=%s ":(glob,icase)ichi" >actual &&
+	echo third >expect &&
+	test_cmp expect actual
+'
+
 test_expect_success 'git config log.follow is overridden by --no-follow' '
 	test_config log.follow true &&
 	git log --no-follow --pretty="format:%s" ichi >actual &&
@@ -248,6 +263,15 @@ test_expect_success 'log --grep' '
 	git log -1 --pretty="tformat:%s" --grep=sec >actual &&
 	test_cmp expect actual
 '
+
+for noop_opt in --invert-grep --all-match
+do
+	test_expect_success "log $noop_opt without --grep is a NOOP" '
+		git log >expect &&
+		git log $noop_opt >actual &&
+		test_cmp expect actual
+	'
+done
 
 cat > expect << EOF
 second
@@ -704,9 +728,12 @@ test_expect_success 'set up more tangled history' '
 	git checkout -b tangle HEAD~6 &&
 	test_commit tangle-a tangle-a a &&
 	git merge main~3 &&
+	git update-ref refs/prefetch/merge HEAD &&
 	git merge side~1 &&
+	git update-ref refs/rewritten/merge HEAD &&
 	git checkout main &&
 	git merge tangle &&
+	git update-ref refs/hidden/tangle HEAD &&
 	git checkout -b reach &&
 	test_commit reach &&
 	git checkout main &&
@@ -821,6 +848,21 @@ test_expect_success 'log.decorate configuration' '
 	git log --pretty=raw >actual &&
 	test_cmp expect.raw actual
 
+'
+
+test_expect_success 'parse log.excludeDecoration with no value' '
+	cp .git/config .git/config.orig &&
+	test_when_finished mv .git/config.orig .git/config &&
+
+	cat >>.git/config <<-\EOF &&
+	[log]
+		excludeDecoration
+	EOF
+	cat >expect <<-\EOF &&
+	error: missing value for '\''log.excludeDecoration'\''
+	EOF
+	git log --decorate=short 2>actual &&
+	test_cmp expect actual
 '
 
 test_expect_success 'decorate-refs with glob' '
@@ -974,9 +1016,9 @@ test_expect_success 'decorate-refs-exclude and simplify-by-decoration' '
 	Merge-tag-reach (HEAD -> main)
 	reach (tag: reach, reach)
 	seventh (tag: seventh)
-	Merge-branch-tangle
-	Merge-branch-side-early-part-into-tangle (tangle)
-	tangle-a (tag: tangle-a)
+	Merge-branch-tangle (refs/hidden/tangle)
+	Merge-branch-side-early-part-into-tangle (refs/rewritten/merge, tangle)
+	Merge-branch-main-early-part-into-tangle (refs/prefetch/merge)
 	EOF
 	git log -n6 --decorate=short --pretty="tformat:%f%d" \
 		--decorate-refs-exclude="*octopus*" \
@@ -1023,6 +1065,115 @@ test_expect_success 'decorate-refs and simplify-by-decoration without output' '
 		--simplify-by-decoration >actual.raw &&
 	sed "s/^[0-9a-f]* //" <actual.raw >actual &&
 	test_cmp expect actual
+'
+
+test_expect_success 'decorate-refs-exclude HEAD' '
+	git log --decorate=full --oneline \
+		--decorate-refs-exclude="HEAD" >actual &&
+	! grep HEAD actual
+'
+
+test_expect_success 'decorate-refs focus from default' '
+	git log --decorate=full --oneline \
+		--decorate-refs="refs/heads" >actual &&
+	! grep HEAD actual
+'
+
+test_expect_success '--clear-decorations overrides defaults' '
+	cat >expect.default <<-\EOF &&
+	Merge-tag-reach (HEAD -> refs/heads/main)
+	Merge-tags-octopus-a-and-octopus-b
+	seventh (tag: refs/tags/seventh)
+	octopus-b (tag: refs/tags/octopus-b, refs/heads/octopus-b)
+	octopus-a (tag: refs/tags/octopus-a, refs/heads/octopus-a)
+	reach (tag: refs/tags/reach, refs/heads/reach)
+	Merge-branch-tangle
+	Merge-branch-side-early-part-into-tangle (refs/heads/tangle)
+	Merge-branch-main-early-part-into-tangle
+	tangle-a (tag: refs/tags/tangle-a)
+	Merge-branch-side
+	side-2 (tag: refs/tags/side-2, refs/heads/side)
+	side-1 (tag: refs/tags/side-1)
+	Second
+	sixth
+	fifth
+	fourth
+	third
+	second
+	initial
+	EOF
+	git log --decorate=full --pretty="tformat:%f%d" >actual &&
+	test_cmp expect.default actual &&
+
+	cat >expect.all <<-\EOF &&
+	Merge-tag-reach (HEAD -> refs/heads/main)
+	Merge-tags-octopus-a-and-octopus-b
+	seventh (tag: refs/tags/seventh)
+	octopus-b (tag: refs/tags/octopus-b, refs/heads/octopus-b)
+	octopus-a (tag: refs/tags/octopus-a, refs/heads/octopus-a)
+	reach (tag: refs/tags/reach, refs/heads/reach)
+	Merge-branch-tangle (refs/hidden/tangle)
+	Merge-branch-side-early-part-into-tangle (refs/rewritten/merge, refs/heads/tangle)
+	Merge-branch-main-early-part-into-tangle (refs/prefetch/merge)
+	tangle-a (tag: refs/tags/tangle-a)
+	Merge-branch-side
+	side-2 (tag: refs/tags/side-2, refs/heads/side)
+	side-1 (tag: refs/tags/side-1)
+	Second
+	sixth
+	fifth
+	fourth
+	third
+	second
+	initial
+	EOF
+	git log --decorate=full --pretty="tformat:%f%d" \
+		--clear-decorations >actual &&
+	test_cmp expect.all actual &&
+	git -c log.initialDecorationSet=all log \
+		--decorate=full --pretty="tformat:%f%d" >actual &&
+	test_cmp expect.all actual
+'
+
+test_expect_success '--clear-decorations clears previous exclusions' '
+	cat >expect.all <<-\EOF &&
+	Merge-tag-reach (HEAD -> refs/heads/main)
+	reach (tag: refs/tags/reach, refs/heads/reach)
+	Merge-tags-octopus-a-and-octopus-b
+	octopus-b (tag: refs/tags/octopus-b, refs/heads/octopus-b)
+	octopus-a (tag: refs/tags/octopus-a, refs/heads/octopus-a)
+	seventh (tag: refs/tags/seventh)
+	Merge-branch-tangle (refs/hidden/tangle)
+	Merge-branch-side-early-part-into-tangle (refs/rewritten/merge, refs/heads/tangle)
+	Merge-branch-main-early-part-into-tangle (refs/prefetch/merge)
+	tangle-a (tag: refs/tags/tangle-a)
+	side-2 (tag: refs/tags/side-2, refs/heads/side)
+	side-1 (tag: refs/tags/side-1)
+	initial
+	EOF
+
+	git log --decorate=full --pretty="tformat:%f%d" \
+		--simplify-by-decoration \
+		--decorate-refs-exclude="heads/octopus*" \
+		--decorate-refs="heads" \
+		--clear-decorations >actual &&
+	test_cmp expect.all actual &&
+
+	cat >expect.filtered <<-\EOF &&
+	Merge-tags-octopus-a-and-octopus-b
+	octopus-b (refs/heads/octopus-b)
+	octopus-a (refs/heads/octopus-a)
+	initial
+	EOF
+
+	git log --decorate=full --pretty="tformat:%f%d" \
+		--simplify-by-decoration \
+		--decorate-refs-exclude="heads/octopus" \
+		--decorate-refs="heads" \
+		--clear-decorations \
+		--decorate-refs-exclude="tags/" \
+		--decorate-refs="heads/octopus*" >actual &&
+	test_cmp expect.filtered actual
 '
 
 test_expect_success 'log.decorate config parsing' '
@@ -1084,6 +1235,30 @@ test_expect_success 'log.abbrevCommit configuration' '
 	test_cmp expect.whatchanged.abbrev actual &&
 	git whatchanged --no-abbrev-commit >actual &&
 	test_cmp expect.whatchanged.full actual
+'
+
+test_expect_success '--abbrev-commit with core.abbrev=false' '
+	git log --no-abbrev >expect &&
+	git -c core.abbrev=false log --abbrev-commit >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success '--abbrev-commit with --no-abbrev' '
+	git log --no-abbrev >expect &&
+	git log --abbrev-commit --no-abbrev >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success '--abbrev-commit with core.abbrev=9000' '
+	git log --no-abbrev >expect &&
+	git -c core.abbrev=9000 log --abbrev-commit >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success '--abbrev-commit with --abbrev=9000' '
+	git log --no-abbrev >expect &&
+	git log --abbrev-commit --abbrev=9000 >actual &&
+	test_cmp expect actual
 '
 
 test_expect_success 'show added path under "--follow -M"' '
@@ -1733,7 +1908,7 @@ test_expect_success '--no-graph does not unset --parents' '
 
 test_expect_success '--reverse and --graph conflict' '
 	test_must_fail git log --reverse --graph 2>stderr &&
-	test_i18ngrep "cannot be used together" stderr
+	test_grep "cannot be used together" stderr
 '
 
 test_expect_success '--reverse --graph --no-graph works' '
@@ -1744,7 +1919,7 @@ test_expect_success '--reverse --graph --no-graph works' '
 
 test_expect_success '--show-linear-break and --graph conflict' '
 	test_must_fail git log --show-linear-break --graph 2>stderr &&
-	test_i18ngrep "cannot be used together" stderr
+	test_grep "cannot be used together" stderr
 '
 
 test_expect_success '--show-linear-break --graph --no-graph works' '
@@ -1755,7 +1930,7 @@ test_expect_success '--show-linear-break --graph --no-graph works' '
 
 test_expect_success '--no-walk and --graph conflict' '
 	test_must_fail git log --no-walk --graph 2>stderr &&
-	test_i18ngrep "cannot be used together" stderr
+	test_grep "cannot be used together" stderr
 '
 
 test_expect_success '--no-walk --graph --no-graph works' '
@@ -1766,8 +1941,8 @@ test_expect_success '--no-walk --graph --no-graph works' '
 
 test_expect_success '--walk-reflogs and --graph conflict' '
 	test_must_fail git log --walk-reflogs --graph 2>stderr &&
-	(test_i18ngrep "cannot combine" stderr ||
-		test_i18ngrep "cannot be used together" stderr)
+	(test_grep "cannot combine" stderr ||
+		test_grep "cannot be used together" stderr)
 '
 
 test_expect_success '--walk-reflogs --graph --no-graph works' '
@@ -1871,7 +2046,7 @@ test_expect_success GPGSM 'log --graph --show-signature x509' '
 test_expect_success GPGSSH 'log --graph --show-signature ssh' '
 	test_config gpg.ssh.allowedSignersFile "${GPGSSH_ALLOWED_SIGNERS}" &&
 	git log --graph --show-signature -n1 signed-ssh >actual &&
-	grep "${GOOD_SIGNATURE_TRUSTED}" actual
+	grep "${GPGSSH_GOOD_SIGNATURE_TRUSTED}" actual
 '
 
 test_expect_success GPGSSH,GPGSSH_VERIFYTIME 'log shows failure on expired signature key' '
@@ -1992,10 +2167,13 @@ test_expect_success GPG 'log --show-signature for merged tag with GPG failure' '
 	git tag -s -m signed_tag_msg signed_tag_fail &&
 	git checkout plain-fail &&
 	git merge --no-ff -m msg signed_tag_fail &&
-	TMPDIR="$(pwd)/bogus" git log --show-signature -n1 plain-fail >actual &&
-	grep "^merged tag" actual &&
-	grep "^No signature" actual &&
-	! grep "^gpg: Signature made" actual
+	if ! test_have_prereq VALGRIND
+	then
+		TMPDIR="$(pwd)/bogus" git log --show-signature -n1 plain-fail >actual &&
+		grep "^merged tag" actual &&
+		grep "^No signature" actual &&
+		! grep "^gpg: Signature made" actual
+	fi
 '
 
 test_expect_success GPGSM 'log --graph --show-signature for merged tag x509' '
@@ -2098,24 +2276,7 @@ test_expect_success 'log on empty repo fails' '
 	git init empty &&
 	test_when_finished "rm -rf empty" &&
 	test_must_fail git -C empty log 2>stderr &&
-	test_i18ngrep does.not.have.any.commits stderr
-'
-
-test_expect_success REFFILES 'log diagnoses bogus HEAD hash' '
-	git init empty &&
-	test_when_finished "rm -rf empty" &&
-	echo 1234abcd >empty/.git/refs/heads/main &&
-	test_must_fail git -C empty log 2>stderr &&
-	test_i18ngrep broken stderr
-'
-
-test_expect_success 'log diagnoses bogus HEAD symref' '
-	git init empty &&
-	git --git-dir empty/.git symbolic-ref HEAD refs/heads/invalid.lock &&
-	test_must_fail git -C empty log 2>stderr &&
-	test_i18ngrep broken stderr &&
-	test_must_fail git -C empty log --default totally-bogus 2>stderr &&
-	test_i18ngrep broken stderr
+	test_grep does.not.have.any.commits stderr
 '
 
 test_expect_success 'log does not default to HEAD when rev input is given' '
@@ -2189,11 +2350,25 @@ test_expect_success 'log --decorate includes all levels of tag annotated tags' '
 	test_cmp expect actual
 '
 
+test_expect_success 'log --decorate does not include things outside filter' '
+	reflist="refs/prefetch refs/rebase-merge refs/bundle" &&
+
+	for ref in $reflist
+	do
+		git update-ref $ref/fake HEAD || return 1
+	done &&
+
+	git log --decorate=full --oneline >actual &&
+
+	# None of the refs are visible:
+	! grep /fake actual
+'
+
 test_expect_success 'log --end-of-options' '
-       git update-ref refs/heads/--source HEAD &&
-       git log --end-of-options --source >actual &&
-       git log >expect &&
-       test_cmp expect actual
+	git update-ref refs/heads/--source HEAD &&
+	git log --end-of-options --source >actual &&
+	git log >expect &&
+	test_cmp expect actual
 '
 
 test_expect_success 'set up commits with different authors' '

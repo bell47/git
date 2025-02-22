@@ -578,6 +578,78 @@ test_expect_success 'subtest: --run invalid range end' '
 	EOF_ERR
 '
 
+test_expect_success 'subtest: --invert-exit-code without --immediate' '
+	run_sub_test_lib_test_err full-pass \
+		--invert-exit-code &&
+	check_sub_test_lib_test_err full-pass \
+		<<-\EOF_OUT 3<<-EOF_ERR
+	ok 1 - passing test #1
+	ok 2 - passing test #2
+	ok 3 - passing test #3
+	# passed all 3 test(s)
+	1..3
+	# faking up non-zero exit with --invert-exit-code
+	EOF_OUT
+	EOF_ERR
+'
+
+test_expect_success 'subtest: --invert-exit-code with --immediate: all passed' '
+	run_sub_test_lib_test_err full-pass \
+		--invert-exit-code --immediate &&
+	check_sub_test_lib_test_err full-pass \
+		<<-\EOF_OUT 3<<-EOF_ERR
+	ok 1 - passing test #1
+	ok 2 - passing test #2
+	ok 3 - passing test #3
+	# passed all 3 test(s)
+	1..3
+	# faking up non-zero exit with --invert-exit-code
+	EOF_OUT
+	EOF_ERR
+'
+
+test_expect_success 'subtest: --invert-exit-code without --immediate: partial pass' '
+	run_sub_test_lib_test partial-pass \
+		--invert-exit-code &&
+	check_sub_test_lib_test partial-pass <<-\EOF
+	ok 1 - passing test #1
+	not ok 2 - # TODO induced breakage (--invert-exit-code): failing test #2
+	#	false
+	ok 3 - passing test #3
+	# failed 1 among 3 test(s)
+	1..3
+	# faked up failures as TODO & now exiting with 0 due to --invert-exit-code
+	EOF
+'
+
+test_expect_success 'subtest: --invert-exit-code with --immediate: partial pass' '
+	run_sub_test_lib_test partial-pass \
+		--invert-exit-code --immediate &&
+	check_sub_test_lib_test partial-pass \
+		<<-\EOF_OUT 3<<-EOF_ERR
+	ok 1 - passing test #1
+	not ok 2 - # TODO induced breakage (--invert-exit-code): failing test #2
+	#	false
+	1..2
+	# faked up failures as TODO & now exiting with 0 due to --invert-exit-code
+	EOF_OUT
+	EOF_ERR
+'
+
+test_expect_success 'subtest: --invert-exit-code --immediate: got a failure' '
+	run_sub_test_lib_test partial-pass \
+		--invert-exit-code --immediate &&
+	check_sub_test_lib_test_err partial-pass \
+		<<-\EOF_OUT 3<<-EOF_ERR
+	ok 1 - passing test #1
+	not ok 2 - # TODO induced breakage (--invert-exit-code): failing test #2
+	#	false
+	1..2
+	# faked up failures as TODO & now exiting with 0 due to --invert-exit-code
+	EOF_OUT
+	EOF_ERR
+'
+
 test_expect_success 'subtest: tests respect prerequisites' '
 	write_and_run_sub_test_lib_test prereqs <<-\EOF &&
 
@@ -612,7 +684,7 @@ test_expect_success 'subtest: tests respect lazy prerequisites' '
 	write_and_run_sub_test_lib_test lazy-prereqs <<-\EOF &&
 
 	test_lazy_prereq LAZY_TRUE true
-	test_expect_success LAZY_TRUE "lazy prereq is satisifed" "true"
+	test_expect_success LAZY_TRUE "lazy prereq is satisfied" "true"
 	test_expect_success !LAZY_TRUE "negative lazy prereq" "false"
 
 	test_lazy_prereq LAZY_FALSE false
@@ -623,7 +695,7 @@ test_expect_success 'subtest: tests respect lazy prerequisites' '
 	EOF
 
 	check_sub_test_lib_test lazy-prereqs <<-\EOF
-	ok 1 - lazy prereq is satisifed
+	ok 1 - lazy prereq is satisfied
 	ok 2 # skip negative lazy prereq (missing !LAZY_TRUE)
 	ok 3 # skip lazy prereq not satisfied (missing LAZY_FALSE)
 	ok 4 - negative false prereq
@@ -743,7 +815,8 @@ test_expect_success 'test_oid provides sane info by default' '
 	grep "^00*\$" actual &&
 	rawsz="$(test_oid rawsz)" &&
 	hexsz="$(test_oid hexsz)" &&
-	test "$hexsz" -eq $(wc -c <actual) &&
+	# +1 accounts for the trailing newline
+	test $(( $hexsz + 1)) -eq $(wc -c <actual) &&
 	test $(( $rawsz * 2)) -eq "$hexsz"
 '
 
@@ -754,7 +827,7 @@ test_expect_success 'test_oid can look up data for SHA-1' '
 	grep "^00*\$" actual &&
 	rawsz="$(test_oid rawsz)" &&
 	hexsz="$(test_oid hexsz)" &&
-	test $(wc -c <actual) -eq 40 &&
+	test $(wc -c <actual) -eq 41 &&
 	test "$rawsz" -eq 20 &&
 	test "$hexsz" -eq 40
 '
@@ -766,7 +839,7 @@ test_expect_success 'test_oid can look up data for SHA-256' '
 	grep "^00*\$" actual &&
 	rawsz="$(test_oid rawsz)" &&
 	hexsz="$(test_oid hexsz)" &&
-	test $(wc -c <actual) -eq 64 &&
+	test $(wc -c <actual) -eq 65 &&
 	test "$rawsz" -eq 32 &&
 	test "$hexsz" -eq 64
 '
@@ -941,7 +1014,7 @@ test_expect_success 'validate object ID for a known tree' '
 '
 
 test_expect_success 'showing tree with git ls-tree' '
-    git ls-tree $tree >current
+	git ls-tree $tree >current
 '
 
 test_expect_success 'git ls-tree output for a known tree' '
@@ -1126,6 +1199,34 @@ test_expect_success 'very long name in the index handled sanely' '
 	git ls-files "a*" >tmp &&
 	len=$(wc -c <tmp) &&
 	test $len = 4098
+'
+
+# D/F conflict checking uses an optimization when adding to the end.
+# make sure it does not get confused by `a-` sorting _between_
+# `a` and `a/`.
+test_expect_success 'more update-index D/F conflicts' '
+	# empty the index to make sure our entry is last
+	git read-tree --empty &&
+	cacheinfo=100644,$(test_oid empty_blob) &&
+	git update-index --add --cacheinfo $cacheinfo,path5/a &&
+
+	test_must_fail git update-index --add --cacheinfo $cacheinfo,path5/a/file &&
+	test_must_fail git update-index --add --cacheinfo $cacheinfo,path5/a/b/file &&
+	test_must_fail git update-index --add --cacheinfo $cacheinfo,path5/a/b/c/file &&
+
+	# "a-" sorts between "a" and "a/"
+	git update-index --add --cacheinfo $cacheinfo,path5/a- &&
+
+	test_must_fail git update-index --add --cacheinfo $cacheinfo,path5/a/file &&
+	test_must_fail git update-index --add --cacheinfo $cacheinfo,path5/a/b/file &&
+	test_must_fail git update-index --add --cacheinfo $cacheinfo,path5/a/b/c/file &&
+
+	cat >expected <<-\EOF &&
+	path5/a
+	path5/a-
+	EOF
+	git ls-files >actual &&
+	test_cmp expected actual
 '
 
 test_expect_success 'test_must_fail on a failing git command' '

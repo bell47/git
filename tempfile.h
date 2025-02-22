@@ -77,12 +77,11 @@
 
 struct tempfile {
 	volatile struct volatile_list_head list;
-	volatile sig_atomic_t active;
 	volatile int fd;
 	FILE *volatile fp;
 	volatile pid_t owner;
 	struct strbuf filename;
-	size_t directorylen;
+	char *directory;
 };
 
 /*
@@ -221,7 +220,7 @@ FILE *fdopen_tempfile(struct tempfile *tempfile, const char *mode);
 
 static inline int is_tempfile_active(struct tempfile *tempfile)
 {
-	return tempfile && tempfile->active;
+	return !!tempfile;
 }
 
 /*
@@ -270,7 +269,7 @@ int reopen_tempfile(struct tempfile *tempfile);
  * `delete_tempfile()` for a `tempfile` object that has already been
  * deleted or renamed.
  */
-void delete_tempfile(struct tempfile **tempfile_p);
+int delete_tempfile(struct tempfile **tempfile_p);
 
 /*
  * Close the file descriptor and/or file pointer if they are still

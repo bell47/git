@@ -1,6 +1,8 @@
 # Helpers for scripts testing bitmap functionality; see t5310 for
 # example usage.
 
+. "$TEST_DIRECTORY"/lib-midx.sh
+
 objdir=.git/objects
 midx=$objdir/pack/multi-pack-index
 
@@ -264,10 +266,6 @@ have_delta () {
 	test_cmp expect actual
 }
 
-midx_checksum () {
-	test-tool read-midx --checksum "$1"
-}
-
 # midx_pack_source <obj>
 midx_pack_source () {
 	test-tool read-midx --show-objects .git/objects | grep "^$1 " | cut -f2
@@ -440,7 +438,7 @@ midx_bitmap_partial_tests () {
 		test_commit packed &&
 		git repack &&
 		test_commit loose &&
-		git multi-pack-index write --bitmap 2>err &&
+		git multi-pack-index write --bitmap &&
 		test_path_is_file $midx &&
 		test_path_is_file $midx-$(midx_checksum $objdir).bitmap
 	'

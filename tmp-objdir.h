@@ -10,22 +10,25 @@
  *
  * Example:
  *
- *	struct tmp_objdir *t = tmp_objdir_create("incoming");
- *	if (!run_command_v_opt_cd_env(cmd, 0, NULL, tmp_objdir_env(t)) &&
- *	    !tmp_objdir_migrate(t))
+ *	struct child_process child = CHILD_PROCESS_INIT;
+ *	struct tmp_objdir *t = tmp_objdir_create(repo, "incoming");
+ *	strvec_push(&child.args, cmd);
+ *	strvec_pushv(&child.env, tmp_objdir_env(t));
+ *	if (!run_command(&child)) && !tmp_objdir_migrate(t))
  *		printf("success!\n");
  *	else
  *		die("failed...tmp_objdir will clean up for us");
  *
  */
 
+struct repository;
 struct tmp_objdir;
 
 /*
  * Create a new temporary object directory with the specified prefix;
  * returns NULL on failure.
  */
-struct tmp_objdir *tmp_objdir_create(const char *prefix);
+struct tmp_objdir *tmp_objdir_create(struct repository *r, const char *prefix);
 
 /*
  * Return a list of environment strings, suitable for use with

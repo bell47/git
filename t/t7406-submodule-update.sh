@@ -25,6 +25,7 @@ compare_head()
 
 
 test_expect_success 'setup a submodule tree' '
+	git config --global protocol.file.allow always &&
 	echo file > file &&
 	git add file &&
 	test_tick &&
@@ -769,7 +770,7 @@ test_expect_success 'submodule update continues after recursive checkout error' 
 	   echo "" > file
 	  )
 	 ) &&
-	 test_must_fail git submodule update --recursive &&
+	 test_expect_code 1 git submodule update --recursive &&
 	 (cd submodule2 &&
 	  git rev-parse --verify HEAD >../actual
 	 ) &&
@@ -944,7 +945,7 @@ test_expect_success 'submodule update places git-dir in superprojects git-dir re
 	git clone super_update_r super_update_r2 &&
 	(cd super_update_r2 &&
 	 git submodule update --init --recursive >actual &&
-	 test_i18ngrep "Submodule path .submodule/subsubmodule.: checked out" actual &&
+	 test_grep "Submodule path .submodule/subsubmodule.: checked out" actual &&
 	 (cd submodule/subsubmodule &&
 	  git log > ../../expected
 	 ) &&
@@ -1024,7 +1025,7 @@ test_expect_success 'submodule update clone shallow submodule outside of depth' 
 		# unadvertised objects, so restrict this test to v0.
 		test_must_fail env GIT_TEST_PROTOCOL_VERSION=0 \
 			git submodule update --init --depth=1 2>actual &&
-		test_i18ngrep "Direct fetching of that commit failed." actual &&
+		test_grep "Direct fetching of that commit failed." actual &&
 		git -C ../submodule config uploadpack.allowReachableSHA1InWant true &&
 		git submodule update --init --depth=1 >actual &&
 		git -C submodule log --oneline >out &&
@@ -1038,7 +1039,7 @@ test_expect_success 'submodule update --recursive drops module name before recur
 	  git checkout HEAD^
 	 ) &&
 	 git submodule update --recursive deeper/submodule >actual &&
-	 test_i18ngrep "Submodule path .deeper/submodule/subsubmodule.: checked out" actual
+	 test_grep "Submodule path .deeper/submodule/subsubmodule.: checked out" actual
 	)
 '
 
@@ -1074,7 +1075,7 @@ test_expect_success 'submodule update --quiet passes quietness to merge/rebase' 
 	 git submodule update --rebase --quiet >out 2>err &&
 	 test_must_be_empty out &&
 	 test_must_be_empty err &&
-	 git submodule update --rebase -v >out 2>err &&
+	 git submodule update --rebase >out 2>err &&
 	 test_file_not_empty out &&
 	 test_must_be_empty err
 	)
@@ -1092,7 +1093,9 @@ test_expect_success 'submodule update --quiet passes quietness to fetch with a s
 	) &&
 	git clone super4 super5 &&
 	(cd super5 &&
-	 git submodule update --quiet --init --depth=1 submodule3 >out 2>err &&
+	 # This test var can mess with the stderr output checked in this test.
+	 GIT_TEST_NAME_HASH_VERSION=1 \
+		git submodule update --quiet --init --depth=1 submodule3 >out 2>err &&
 	 test_must_be_empty out &&
 	 test_must_be_empty err
 	) &&
@@ -1114,6 +1117,139 @@ test_expect_success 'submodule update --filter sets partial clone settings' '
 	git -C super-filter submodule update --init --filter blob:none &&
 	test_cmp_config -C super-filter/submodule true remote.origin.promisor &&
 	test_cmp_config -C super-filter/submodule blob:none remote.origin.partialclonefilter
+'
+
+# NEEDSWORK: Clean up the tests so that we can reuse the test setup.
+# Don't reuse the existing repos because the earlier tests have
+# intentionally disruptive configurations.
+test_expect_success 'setup clean recursive superproject' '
+	git init bottom &&
+	test_commit -C bottom "bottom" &&
+	git init middle &&
+	git -C middle submodule add ../bottom bottom &&
+	git -C middle commit -m "middle" &&
+	git init top &&
+	git -C top submodule add ../middle middle &&
+	git -C top commit -m "top" &&
+	git clone --recurse-submodules top top-clean
+'
+
+test_expect_success 'submodule update should skip unmerged submodules' '
+	test_when_finished "rm -fr top-cloned" &&
+	cp -r top-clean top-cloned &&
+
+	# Create an upstream commit in each repo, starting with bottom
+	test_commit -C bottom upstream_commit &&
+	# Create middle commit
+	git -C middle/bottom fetch &&
+	git -C middle/bottom checkout -f FETCH_HEAD &&
+	git -C middle add bottom &&
+	git -C middle commit -m "upstream_commit" &&
+	# Create top commit
+	git -C top/middle fetch &&
+	git -C top/middle checkout -f FETCH_HEAD &&
+	git -C top add middle &&
+	git -C top commit -m "upstream_commit" &&
+
+	# Create a downstream conflict
+	test_commit -C top-cloned/middle/bottom downstream_commit &&
+	git -C top-cloned/middle add bottom &&
+	git -C top-cloned/middle commit -m "downstream_commit" &&
+	git -C top-cloned/middle fetch --recurse-submodules origin &&
+	test_must_fail git -C top-cloned/middle merge origin/main &&
+
+	# Make the update of "middle" a no-op, otherwise we error out
+	# because of its unmerged state
+	test_config -C top-cloned submodule.middle.update !true &&
+	git -C top-cloned submodule update --recursive 2>actual.err &&
+	cat >expect.err <<-\EOF &&
+	Skipping unmerged submodule middle/bottom
+	EOF
+	test_cmp expect.err actual.err
+'
+
+test_expect_success 'submodule update --recursive skip submodules with strategy=none' '
+	test_when_finished "rm -fr top-cloned" &&
+	cp -r top-clean top-cloned &&
+
+	test_commit -C top-cloned/middle/bottom downstream_commit &&
+	git -C top-cloned/middle config submodule.bottom.update none &&
+	git -C top-cloned submodule update --recursive 2>actual.err &&
+	cat >expect.err <<-\EOF &&
+	Skipping submodule '\''middle/bottom'\''
+	EOF
+	test_cmp expect.err actual.err
+'
+
+add_submodule_commit_and_validate () {
+	HASH=$(git rev-parse HEAD) &&
+	git update-index --add --cacheinfo 160000,$HASH,sub &&
+	git commit -m "create submodule" &&
+	echo "160000 commit $HASH	sub" >expect &&
+	git ls-tree HEAD -- sub >actual &&
+	test_cmp expect actual
+}
+
+test_expect_success 'commit with staged submodule change' '
+	add_submodule_commit_and_validate
+'
+
+test_expect_success 'commit with staged submodule change with ignoreSubmodules dirty' '
+	test_config diff.ignoreSubmodules dirty &&
+	add_submodule_commit_and_validate
+'
+
+test_expect_success 'commit with staged submodule change with ignoreSubmodules all' '
+	test_config diff.ignoreSubmodules all &&
+	add_submodule_commit_and_validate
+'
+
+test_expect_success CASE_INSENSITIVE_FS,SYMLINKS \
+	'submodule paths must not follow symlinks' '
+
+	# This is only needed because we want to run this in a self-contained
+	# test without having to spin up an HTTP server; However, it would not
+	# be needed in a real-world scenario where the submodule is simply
+	# hosted on a public site.
+	test_config_global protocol.file.allow always &&
+
+	# Make sure that Git tries to use symlinks on Windows
+	test_config_global core.symlinks true &&
+
+	tell_tale_path="$PWD/tell.tale" &&
+	git init hook &&
+	(
+		cd hook &&
+		mkdir -p y/hooks &&
+		write_script y/hooks/post-checkout <<-EOF &&
+		echo HOOK-RUN >&2
+		echo hook-run >"$tell_tale_path"
+		EOF
+		git add y/hooks/post-checkout &&
+		test_tick &&
+		git commit -m post-checkout
+	) &&
+
+	hook_repo_path="$(pwd)/hook" &&
+	git init captain &&
+	(
+		cd captain &&
+		git submodule add --name x/y "$hook_repo_path" A/modules/x &&
+		test_tick &&
+		git commit -m add-submodule &&
+
+		printf .git >dotgit.txt &&
+		git hash-object -w --stdin <dotgit.txt >dot-git.hash &&
+		printf "120000 %s 0\ta\n" "$(cat dot-git.hash)" >index.info &&
+		git update-index --index-info <index.info &&
+		test_tick &&
+		git commit -m add-symlink
+	) &&
+
+	test_path_is_missing "$tell_tale_path" &&
+	git clone --recursive captain hooked 2>err &&
+	test_grep ! HOOK-RUN err &&
+	test_path_is_missing "$tell_tale_path"
 '
 
 test_done
